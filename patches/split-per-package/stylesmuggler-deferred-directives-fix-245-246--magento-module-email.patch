@@ -1,0 +1,25 @@
+StyleSmuggler deferred-directives fix, magento/module-email half
+
+One half of patches/stylesmuggler-deferred-directives-fix-245-246.patch. The combined patch touches two
+packages, which a plugin that patches per package cannot handle, so it is split
+here. Paths are left as vendor/magento/..., which those plugins resolve through
+their -p4 fallback.
+
+Package : magento/module-email
+Magento : 2.4.5 from p1, and 2.4.6, every patch level
+Origin  : https://gist.github.com/pingiun/00cfbfdc3cf517807eb3b6bc24c7f295
+
+Both halves are required; applying only one leaves the fix incomplete.
+
+diff --git a/vendor/magento/module-email/Model/Template/Filter.php b/vendor/magento/module-email/Model/Template/Filter.php
+index a76ade5..4dcedc1 100644
+--- a/vendor/magento/module-email/Model/Template/Filter.php
++++ b/vendor/magento/module-email/Model/Template/Filter.php
+@@ -977,6 +977,7 @@ class Filter extends Template
+         // If this template is a child of another template, skip processing so that the parent template will process
+         // this directive. This is important as CSS inlining must operate on the entire HTML document.
+         if ($this->isChildTemplate()) {
++            $this->deferToParent($construction[0]);
+             return $construction[0];
+         }
+ 

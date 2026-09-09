@@ -1,0 +1,96 @@
+diff --git a/vendor/magento/module-email/Model/Template/Filter.php b/vendor/magento/module-email/Model/Template/Filter.php
+index a76ade5..4dcedc1 100644
+--- a/vendor/magento/module-email/Model/Template/Filter.php
++++ b/vendor/magento/module-email/Model/Template/Filter.php
+@@ -977,6 +977,7 @@ class Filter extends Template
+         // If this template is a child of another template, skip processing so that the parent template will process
+         // this directive. This is important as CSS inlining must operate on the entire HTML document.
+         if ($this->isChildTemplate()) {
++            $this->deferToParent($construction[0]);
+             return $construction[0];
+         }
+ 
+diff --git a/vendor/magento/framework/Filter/Template.php b/vendor/magento/framework/Filter/Template.php
+index 7e558c4..af6f9bd 100644
+--- a/vendor/magento/framework/Filter/Template.php
++++ b/vendor/magento/framework/Filter/Template.php
+@@ -110,6 +110,18 @@ class Template implements FilterInterface
+      */
+     private $filteringDepthMeter;
+ 
++    /**
++     * Directives that this filter has explicitly deferred to its parent template.
++     *
++     * Only these are signed. A directive must never be considered deferred merely because
++     * processing left it unchanged - an unresolvable directive (for instance one supplied
++     * through a template variable) also comes back unchanged, and signing it would hand
++     * attacker-controlled content a valid signature for the parent to execute.
++     *
++     * @var string[]
++     */
++    private $deferredDirectives = [];
++
+     /**
+      * @param StringUtils $string
+      * @param array $variables
+@@ -202,6 +214,11 @@ class Template implements FilterInterface
+ 
+         $this->filteringDepthMeter->descend();
+ 
++        // filter() is re-entrant (directives filter their own bodies), so deferrals
++        // recorded by an outer invocation must not leak into this one.
++        $outerDeferredDirectives = $this->deferredDirectives;
++        $this->deferredDirectives = [];
++
+         // Processing of template directives.
+         $templateDirectivesResults = $this->processDirectives($value);
+ 
+@@ -217,12 +234,14 @@ class Template implements FilterInterface
+             $value = str_replace($result['directive'], $result['output'], $value);
+         }
+ 
+-        if ($this->filteringDepthMeter->showMark() > 1) {
++        if ($this->filteringDepthMeter->showMark() > 1 && $this->deferredDirectives) {
+             // Signing own deferred directives (if any).
+             $signature = $this->signatureProvider->get();
+ 
+             foreach ($templateDirectivesResults as $result) {
+-                if ($result['directive'] === $result['output']) {
++                if ($result['directive'] === $result['output']
++                    && in_array($result['directive'], $this->deferredDirectives, true)
++                ) {
+                     $value = str_replace(
+                         $result['output'],
+                         $signature . $result['output'] . $signature,
+@@ -232,6 +251,8 @@ class Template implements FilterInterface
+             }
+         }
+ 
++        $this->deferredDirectives = $outerDeferredDirectives;
++
+         $value = $this->afterFilter($value);
+ 
+         $this->filteringDepthMeter->ascend();
+@@ -239,6 +260,22 @@ class Template implements FilterInterface
+         return $value;
+     }
+ 
++    /**
++     * Marks a directive as deferred to the parent template.
++     *
++     * A directive processor that returns its own construction unchanged so that the parent
++     * template processes it instead (for example {{inlinecss}} in a child template) must
++     * declare that here. Only declared directives are signed and therefore re-processed by
++     * the parent; everything else stays inert once this filter has produced it.
++     *
++     * @param string $directive
++     * @return void
++     */
++    public function deferToParent(string $directive): void
++    {
++        $this->deferredDirectives[] = $directive;
++    }
++
+     /**
+      * Processes template directives and returns an array that contains results produced by each directive.
+      *

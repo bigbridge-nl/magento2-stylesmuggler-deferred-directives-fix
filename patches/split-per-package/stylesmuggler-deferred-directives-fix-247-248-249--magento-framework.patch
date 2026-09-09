@@ -1,0 +1,97 @@
+StyleSmuggler deferred-directives fix, magento/framework half
+
+One half of patches/stylesmuggler-deferred-directives-fix-247-248-249.patch. The combined patch touches two
+packages, which a plugin that patches per package cannot handle, so it is split
+here. Paths are left as vendor/magento/..., which those plugins resolve through
+their -p4 fallback.
+
+Package : magento/framework
+Magento : 2.4.7, 2.4.8 and 2.4.9, every patch level
+Origin  : https://gist.github.com/pingiun/00cfbfdc3cf517807eb3b6bc24c7f295
+
+Both halves are required; applying only one leaves the fix incomplete.
+
+diff --git a/vendor/magento/framework/Filter/Template.php b/vendor/magento/framework/Filter/Template.php
+index 3476aceba12..05f01100772 100644
+--- a/vendor/magento/framework/Filter/Template.php
++++ b/vendor/magento/framework/Filter/Template.php
+@@ -110,6 +110,18 @@ class Template implements FilterInterface
+      */
+     private $filteringDepthMeter;
+ 
++    /**
++     * Directives that this filter has explicitly deferred to its parent template.
++     *
++     * Only these are signed. A directive must never be considered deferred merely because
++     * processing left it unchanged - an unresolvable directive (for instance one supplied
++     * through a template variable) also comes back unchanged, and signing it would hand
++     * attacker-controlled content a valid signature for the parent to execute.
++     *
++     * @var string[]
++     */
++    private $deferredDirectives = [];
++
+     /**
+      * @param StringUtils $string
+      * @param array $variables
+@@ -203,6 +215,11 @@ class Template implements FilterInterface
+ 
+         $this->filteringDepthMeter->descend();
+ 
++        // filter() is re-entrant (directives filter their own bodies), so deferrals
++        // recorded by an outer invocation must not leak into this one.
++        $outerDeferredDirectives = $this->deferredDirectives;
++        $this->deferredDirectives = [];
++
+         // Processing of template directives.
+         $templateDirectivesResults = array_unique(
+             $this->processDirectives($value),
+@@ -220,12 +237,14 @@ class Template implements FilterInterface
+ 
+         $value = $this->applyDirectivesResults($value, $deferredDirectivesResults);
+ 
+-        if ($this->filteringDepthMeter->showMark() > 1) {
++        if ($this->filteringDepthMeter->showMark() > 1 && $this->deferredDirectives) {
+             // Signing own deferred directives (if any).
+             $signature = $this->signatureProvider->get();
+ 
+             foreach ($templateDirectivesResults as $result) {
+-                if ($result['directive'] === $result['output']) {
++                if ($result['directive'] === $result['output']
++                    && in_array($result['directive'], $this->deferredDirectives, true)
++                ) {
+                     $value = str_replace(
+                         $result['output'],
+                         $signature . $result['output'] . $signature,
+@@ -235,6 +254,8 @@ class Template implements FilterInterface
+             }
+         }
+ 
++        $this->deferredDirectives = $outerDeferredDirectives;
++
+         $value = $this->afterFilter($value);
+ 
+         $this->filteringDepthMeter->ascend();
+@@ -242,6 +263,22 @@ class Template implements FilterInterface
+         return $value;
+     }
+ 
++    /**
++     * Marks a directive as deferred to the parent template.
++     *
++     * A directive processor that returns its own construction unchanged so that the parent
++     * template processes it instead (for example {{inlinecss}} in a child template) must
++     * declare that here. Only declared directives are signed and therefore re-processed by
++     * the parent; everything else stays inert once this filter has produced it.
++     *
++     * @param string $directive
++     * @return void
++     */
++    public function deferToParent(string $directive): void
++    {
++        $this->deferredDirectives[] = $directive;
++    }
++
+     /**
+      * Processes template directives and returns an array that contains results produced by each directive.
+      *

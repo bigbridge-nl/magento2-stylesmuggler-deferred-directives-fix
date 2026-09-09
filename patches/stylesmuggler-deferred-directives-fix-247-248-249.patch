@@ -1,0 +1,130 @@
+StyleSmuggler root cause: only sign directives that were explicitly deferred
+
+Framework\Filter\Template signs "deferred" directives - those a child template hands up to
+its parent - with a per-request value, and its second pass executes only signed directives.
+A directive is judged deferred by testing whether processing left it unchanged:
+
+    if ($result['directive'] === $result['output']) { ...sign it... }
+
+That is also true for any directive the filter could not resolve. Framework\Filter\Template
+has no blockDirective, so a {{block}} arriving through a customer field passes through
+untouched, is mistaken for deferred, and is signed. Email\Model\Template\Filter does
+implement blockDirective, so the parent then executes it.
+
+This replaces the heuristic with an explicit declaration: Template::deferToParent() records
+intent, and only recorded directives are signed. Email\Model\Template\Filter::inlinecssDirective()
+declares itself in its isChildTemplate() branch - the only genuine deferral in the codebase.
+
+The signature scheme itself is unchanged. The unchanged-output test is kept as a required
+conjunct, so the set of signed directives is a strict subset of what was signed before;
+nothing that was previously unsigned becomes signed.
+
+Scope: this is the root cause only. The check-after-construct defects in BlockFactory and
+UrlGeneratorFactory, and the report-file execution guards, are addressed by Adobe's
+APSB26-146 patch; they are deliberately not duplicated here. The two patches touch disjoint
+files and are intended to be applied together.
+
+Origin: https://gist.github.com/pingiun/00cfbfdc3cf517807eb3b6bc24c7f295
+Adapted for a Composer install: paths rewritten from the magento2 source layout
+(app/code/Magento/Email, lib/internal/Magento/Framework) to vendor/magento/*, and the
+upstream unit tests dropped - the vendor dist of TemplateTest.php differs from the source
+repo copy, so those hunks do not apply here.
+
+Applies -p1 from the project root. Verified against Magento 2.4.8-p5.
+
+diff --git a/vendor/magento/module-email/Model/Template/Filter.php b/vendor/magento/module-email/Model/Template/Filter.php
+index f86deacad3b..e257a38932a 100644
+--- a/vendor/magento/module-email/Model/Template/Filter.php
++++ b/vendor/magento/module-email/Model/Template/Filter.php
+@@ -980,6 +980,7 @@ class Filter extends Template
+         // If this template is a child of another template, skip processing so that the parent template will process
+         // this directive. This is important as CSS inlining must operate on the entire HTML document.
+         if ($this->isChildTemplate()) {
++            $this->deferToParent($construction[0]);
+             return $construction[0];
+         }
+ 
+diff --git a/vendor/magento/framework/Filter/Template.php b/vendor/magento/framework/Filter/Template.php
+index 3476aceba12..05f01100772 100644
+--- a/vendor/magento/framework/Filter/Template.php
++++ b/vendor/magento/framework/Filter/Template.php
+@@ -110,6 +110,18 @@ class Template implements FilterInterface
+      */
+     private $filteringDepthMeter;
+ 
++    /**
++     * Directives that this filter has explicitly deferred to its parent template.
++     *
++     * Only these are signed. A directive must never be considered deferred merely because
++     * processing left it unchanged - an unresolvable directive (for instance one supplied
++     * through a template variable) also comes back unchanged, and signing it would hand
++     * attacker-controlled content a valid signature for the parent to execute.
++     *
++     * @var string[]
++     */
++    private $deferredDirectives = [];
++
+     /**
+      * @param StringUtils $string
+      * @param array $variables
+@@ -203,6 +215,11 @@ class Template implements FilterInterface
+ 
+         $this->filteringDepthMeter->descend();
+ 
++        // filter() is re-entrant (directives filter their own bodies), so deferrals
++        // recorded by an outer invocation must not leak into this one.
++        $outerDeferredDirectives = $this->deferredDirectives;
++        $this->deferredDirectives = [];
++
+         // Processing of template directives.
+         $templateDirectivesResults = array_unique(
+             $this->processDirectives($value),
+@@ -220,12 +237,14 @@ class Template implements FilterInterface
+ 
+         $value = $this->applyDirectivesResults($value, $deferredDirectivesResults);
+ 
+-        if ($this->filteringDepthMeter->showMark() > 1) {
++        if ($this->filteringDepthMeter->showMark() > 1 && $this->deferredDirectives) {
+             // Signing own deferred directives (if any).
+             $signature = $this->signatureProvider->get();
+ 
+             foreach ($templateDirectivesResults as $result) {
+-                if ($result['directive'] === $result['output']) {
++                if ($result['directive'] === $result['output']
++                    && in_array($result['directive'], $this->deferredDirectives, true)
++                ) {
+                     $value = str_replace(
+                         $result['output'],
+                         $signature . $result['output'] . $signature,
+@@ -235,6 +254,8 @@ class Template implements FilterInterface
+             }
+         }
+ 
++        $this->deferredDirectives = $outerDeferredDirectives;
++
+         $value = $this->afterFilter($value);
+ 
+         $this->filteringDepthMeter->ascend();
+@@ -242,6 +263,22 @@ class Template implements FilterInterface
+         return $value;
+     }
+ 
++    /**
++     * Marks a directive as deferred to the parent template.
++     *
++     * A directive processor that returns its own construction unchanged so that the parent
++     * template processes it instead (for example {{inlinecss}} in a child template) must
++     * declare that here. Only declared directives are signed and therefore re-processed by
++     * the parent; everything else stays inert once this filter has produced it.
++     *
++     * @param string $directive
++     * @return void
++     */
++    public function deferToParent(string $directive): void
++    {
++        $this->deferredDirectives[] = $directive;
++    }
++
+     /**
+      * Processes template directives and returns an array that contains results produced by each directive.
+      *
